@@ -13,263 +13,302 @@ import openpyxl
 from openpyxl.styles import Font, Alignment, Border, Side
 from openpyxl.utils.dataframe import dataframe_to_rows
 import info
+from selenium import webdriver
+from selenium.webdriver.chrome.service import Service as ChromeService
+from webdriver_manager.chrome import ChromeDriverManager
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.common.exceptions import TimeoutException
+import os
+import time
+import json
+from datetime import datetime
+
+
+root_url = 'https://partner.caravanpark.kr'
+ID = 'elpark4'
+PW = '1234'
+
+def setup_selenium_and_login(user_id, user_password):
+    """
+    Selenium WebDriver를 설정하고, 로그인 성공 페이지 URL('/reservation/monthly')로
+    이동하는 것을 기준으로 안정적으로 로그인을 확인합니다.
+    """
+    print("[DEBUG] Setting up Selenium WebDriver and logging in...")
+    options = webdriver.ChromeOptions()
+    options.add_argument('--no-sandbox')
+    options.add_argument('--disable-dev-shm-usage')
+    options.add_argument('--disable-gpu')
+    # options.add_argument('--headless') # 필요 시 주석 해제
+
+    driver = None
+    try:
+        # 1. webdriver-manager 사용 시도
+        service = ChromeService(ChromeDriverManager().install())
+        driver = webdriver.Chrome(service=service, options=options)
+    except Exception as e:
+        print(f"[DEBUG] webdriver-manager failed: {e}")
+        # 2. 로컬 chromedriver 사용 시도
+        chromedriver_path = "chromedriver-win64/chromedriver.exe"
+        if os.path.exists(chromedriver_path):
+            print(f"[DEBUG] Using local chromedriver: {chromedriver_path}")
+            service = ChromeService(executable_path=chromedriver_path)
+            driver = webdriver.Chrome(service=service, options=options)
+        else:
+            raise Exception("ChromeDriver not found by webdriver-manager or in local path.")
+
+    # 로그인 페이지로 이동 및 로그인 수행
+    signin_page_url = f"{root_url}/auth/signin"
+    driver.get(signin_page_url)
+    
+    try:
+        # 필드가 나타날 때까지 최대 10초 대기
+        username_field = WebDriverWait(driver, 10).until(
+            EC.presence_of_element_located((By.NAME, "masterId"))
+        )
+        password_field = driver.find_element(By.NAME, "masterPass")
+        
+        username_field.send_keys(user_id)
+        password_field.send_keys(user_password)
+
+        login_button = driver.find_element(By.CSS_SELECTOR, "button[type='submit']")
+        login_button.click()
+        
+        print("[DEBUG] 로그인 버튼 클릭. '/reservation/monthly' 페이지로 이동할 때까지 최대 15초 대기...")
+        
+        # 가장 확실한 방법: 로그인 성공 후의 실제 URL로 이동했는지 확인
+        WebDriverWait(driver, 15).until(
+            EC.url_contains('/reservation/monthly')
+        )
+        
+        print(f"[DEBUG] 로그인 성공! 성공 페이지로 이동했습니다: {driver.current_url}")
+
+    except TimeoutException:
+        print("[CRITICAL ERROR] 로그인 실패: 제한 시간(15초) 내에 예약 관리 페이지로 이동하지 못했습니다.")
+        print(f"[DEBUG] 현재 머물러 있는 페이지 주소: {driver.current_url}")
+        print("[INFO] 아이디/패스워드가 정확한지, 또는 사이트의 다른 문제가 있는지 확인해주세요.")
+        if driver:
+            driver.quit()
+        raise Exception("로그인에 실패했습니다. 사이트 응답이 없거나 인증 정보가 틀렸을 수 있습니다.")
+    except Exception as e:
+        if driver:
+            driver.quit()
+        raise Exception(f"로그인 중 예상치 못한 오류 발생: {e}")
+
+    return driver
 
 def get_reservation():
+    """
+    사용자께서 제공해주신 HTML 구조를 기반으로, 가장 확실한 대기 방법과
+    정확한 파싱 로직으로 모든 예약 정보를 가져옵니다.
+    """
+    today_str = datetime.now().strftime('%Y-%m-%d')
+    driver = None
+    all_reservations = []
 
-    # today = datetime.datetime.today().strftime("%Y-%m-%d")
-    today='2024-01-29'
-    user_id = info.user_id
-    user_password = info.user_password
+    try:
+        driver = setup_selenium_and_login(ID, PW)
 
-    root_url = info.root_url
-    login_url = root_url + info.login_url
-    calendar_url = info.calendar_url
-    today_reserve_url = root_url + info.today_reserve_url+today
-    today_room_detail_url = root_url + info.today_room_detail_url
+        print("\n[INFO] 예약 목록 페이지로 이동하여 검색을 시작합니다...")
+        list_url = f"{root_url}/reservation/list?startDate={today_str}&endDate={today_str}&dateMode=sdate"
+        driver.get(list_url)
 
-    form_data = {
-        'pid': user_id,
-        'ppw': user_password,
-        'm_chk': 'N'  # 이 값은 폼에 있는 체크박스의 기본값입니다.
-    }
-
-    with requests.Session() as session:
-        # POST 요청으로 로그인을 시도합니다.
-        response = session.post(login_url, data=form_data)
-
-        # 전체 달력 가져오기
-        response = session.get(calendar_url)
-        # 오늘 날짜 예약 가져오기
-        response = session.get(today_reserve_url)
-        soup = BeautifulSoup(response.text, 'html.parser')
-        # reservation_rows = soup.find_all('tr', class_='has-background-success-light')
-        reservation_table = soup.find('table',
-                                      class_='table table-p-rsv-list is-size-7 is-fullwidth is-hoverable has-text-centered')
-        reservation_tbody = reservation_table.find('tbody') if reservation_table else None
-        if reservation_tbody:
-            reservation_rows = reservation_tbody.find_all('tr')
-        # calendar_div = soup.find('div', class_='cal-td-title')
-        reservations = []
-
-        # 각 행에 대해 반복
-        for row in reservation_rows:
-            cells = row.find_all('td')
-
-            if len(cells) < 10:
-                continue
-            detail_info = {
-                'type': '',
-                'room_type':'',
-                'name':'',
-                'phone':'',
-                'total_count':'',
-                'bbq' :'',
-                'campFire' :'',
-                'etc':''
-            }
-            # 예약자 정보와 객실명 추출
-
-            if cells[9].get_text(strip=True) =='예약완료' or cells[9].get_text(strip=True) =='입금대기':
-                reservation_number = cells[0].get_text(strip=True)
-                response = session.get(today_room_detail_url + reservation_number)
-                soup = BeautifulSoup(response.text, 'html.parser')
-
-                client_detail_table = soup.find('table', class_='table table-p-rsv-detail is-size-6 is-bordered is-fullwidth')
-                reservation_detail_table = soup.find('table', id='tbody-rsv-plain')
-                option_detail_tables = soup.find_all('table', class_='table table-p-rsv-detail is-size-7 is-bordered is-fullwidth has-text-centered')
-
-                # "옵션상품 이용"이 포함된 테이블만을 저장할 리스트
-                option_detail_table = []
-
-                # 각 테이블에 대해 반복
-                for html_table in option_detail_tables:
-                    # 테이블에서 "옵션상품 이용" 텍스트를 포함하는 th 태그 찾기
-                    if html_table.find('th', string="옵션상품 이용"):
-                        option_detail_table.append(html_table)
-
-                # client_detail_table를 이용한 이름, 전화번호 가져오기
-                name_input = client_detail_table.find('input', {'name': 'name'})
-                phone_input = client_detail_table.find('input', {'name': 'hphone'})
-
-                name = name_input['value'] if name_input else '이름 정보 없음'
-                phone = phone_input['value'] if phone_input else '전화번호 정보 없음'
-                detail_info['name'] = name
-                detail_info['phone'] = phone
-            if cells[9].get_text(strip=True) =='입금대기':
-                detail_info['etc'] = '예약대기'
-
-
-            # revervation_detail_table를 이용한 예약인원, 바베큐, 캠프파이어 정보 가져오기
-
-            tbody = reservation_detail_table.find('tbody')
-            print(tbody)
-            if tbody:
-                # 첫 번째 행 찾기
-                row = tbody.find('tr')
-
-                # 각각의 수를 추출하기 위한 td 태그 찾기
-                room_type = row.find_all('td')[1].get_text(strip=True).split('\n')[0].split('(')[0] # 룸타입
-                if '카라반' in room_type:
-                    detail_info['type']='caravan'
+        # 체크박스들을 제어 (가장 강력하고 안정적인 방식으로 수정)
+        checkbox_labels_to_check = ["예약완료", "입금대기"]
+        for label_text in checkbox_labels_to_check:
+            try:
+                label = WebDriverWait(driver, 5).until(
+                    EC.presence_of_element_located((By.XPATH, f"//label[contains(normalize-space(), '{label_text}')]"))
+                )
+                checkbox = label.find_element(By.XPATH, ".//input[@type='checkbox']")
+                
+                if not checkbox.is_selected():
+                    driver.execute_script("arguments[0].click();", checkbox)
+                    WebDriverWait(driver, 2).until(EC.element_to_be_selected(checkbox))
+                    print(f"[DEBUG] '{label_text}' 체크박스를 클릭했습니다.")
                 else:
-                    detail_info['type']='pension'
+                    print(f"[DEBUG] '{label_text}' 체크박스가 이미 선택되어 있습니다.")
+            except Exception as e:
+                print(f"[WARN] '{label_text}' 체크박스 처리 중 오류 발생: {e}")
+                # 오류가 발생해도 계속 진행
 
-                adult = row.find_all('td')[3].get_text(strip=True)   # "성인" 수
-                child = row.find_all('td')[4].get_text(strip=True)   # "아동" 수
-                infant = row.find_all('td')[5].get_text(strip=True)  # "유아" 수
-                detail_info['room_type']=room_type
-                detail_info['total_count'] = '성인 : '+str(adult)+ ', 아동 : '+str(child) + ', 유아 : '+str(infant) +'\n (추가인원) 성인:   명, 유아:   명'
+        # '검색' 버튼 클릭 (가장 강력한 방식으로 수정)
+        try:
+            print("[DEBUG] '검색' 버튼을 클릭합니다.")
+            search_button = WebDriverWait(driver, 10).until(
+                EC.element_to_be_clickable((By.XPATH, "//button[contains(., '검색')]"))
+            )
+            driver.execute_script("arguments[0].click();", search_button)
+        except Exception as e:
+            print("[CRITICAL ERROR] '검색' 버튼을 클릭하는 데 실패했습니다.")
+            raise e
 
+        # --- 데이터 파싱 로직 시작 ---
+        try:
+            # 최종 해결책: 첫 번째 예약 번호 링크가 나타날 때까지 대기
+            print("[DEBUG] 검색 결과를 기다립니다 (테이블의 첫 예약번호 링크가 보일 때까지 최대 15초)...")
+            WebDriverWait(driver, 15).until(
+                EC.visibility_of_element_located((By.CSS_SELECTOR, "tbody a[href*='/detail/']"))
+            )
+            print("[DEBUG] 예약 목록 테이블이 표시된 것을 확인했습니다.")
+        except TimeoutException:
+            print("[INFO] 검색 결과, 오늘 날짜의 예약이 없습니다.")
+            if driver:
+                driver.quit()
+            return [], today_str
 
-            else:
-                print("테이블 내용이 없습니다.")
+        # 페이지 소스를 가져와서 BeautifulSoup으로 파싱
+        page_source = driver.page_source
+        soup = BeautifulSoup(page_source, 'html.parser')
 
+        # 사용자께서 알려주신 정확한 선택자 사용
+        table_body = soup.find('tbody', class_='divide-y')
 
-            if len(option_detail_table) != 0:
-                #테이블 내의 모든 텍스트 가져오기
-                table_text = option_detail_table[0].get_text()
+        if not table_body:
+            print("[INFO] 예약 테이블(tbody)을 찾았으나 내용이 없습니다.")
+            if driver:
+                driver.quit()
+            return [], today_str
 
-                # "바베큐"와 "불멍" 단어 존재 여부 확인
-                bbq_exists = '결제 완료' if '바베큐' in table_text else ''
-                firepit_exists = '결제 완료' if '불멍' in table_text else ''
+        # 모든 행(tr)을 가져옴
+        rows = table_body.find_all('tr', recursive=False)
+        print(f"[DEBUG] 테이블에서 {len(rows)}개의 행(tr)을 발견했습니다.")
 
-                detail_info['bbq'] = bbq_exists
-                detail_info['campFire'] = firepit_exists
-            # break
+        for row in rows:
+            # 상세 정보 행(colspan이 있는)은 건너뜀
+            if row.find('td', colspan=True):
+                continue
+            
+            cols = row.find_all('td')
+            if len(cols) < 16:
+                print(f"[DEBUG] 데이터 행이 아닌 것 같아 건너뜁니다.")
+                continue
 
-            reservations.append(detail_info)
-    return reservations, today
+            try:
+                # 제공해주신 HTML 구조에 기반하여 정확한 인덱스로 데이터 추출
+                reservation_data = {
+                    '예약번호': cols[0].get_text(strip=True),
+                    '예약자명': cols[1].get_text(separator=' ', strip=True),
+                    '객실명': cols[2].get_text(strip=True),
+                    '숙박일': cols[3].get_text(separator=' ', strip=True),
+                    '기간': cols[4].get_text(strip=True),
+                    '인원': cols[5].get_text(separator=' ', strip=True),
+                    '판매금액': cols[10].get_text(strip=True),
+                    '상태': cols[14].get_text(strip=True),
+                    '예약경로': cols[15].get_text(strip=True),
+                }
+                all_reservations.append(reservation_data)
+            except (AttributeError, IndexError) as e:
+                print(f"[WARN] 데이터 행 파싱 중 오류 발생 (예상치 못한 구조): {e}")
+                continue
+        
+        print(f"[INFO] 총 {len(all_reservations)}건의 예약 정보를 성공적으로 파싱했습니다.")
+        return all_reservations, today_str
 
-
+    except Exception as e:
+        print(f"[CRITICAL ERROR] 스크립트 실행 중 심각한 오류가 발생했습니다: {e}")
+        # 디버깅을 위해 스크린샷 저장
+        if driver:
+            error_screenshot = f"error_screenshot_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
+            driver.save_screenshot(error_screenshot)
+            print(f"[DEBUG] 오류 발생 당시 화면을 '{error_screenshot}' 파일로 저장했습니다.")
+    finally:
+        if driver:
+            driver.quit()
+            print("[INFO] WebDriver를 종료했습니다.")
+            
+    return all_reservations, today_str
 
 
 def make_daily_paper():
-    column_mapping = {
-        'type': '종류',
-        'room_type':'객실명',
-        'name':'예약자',
-        'phone':'전화번호',
-        'total_count':'인원수',
-        'bbq' :'바베큐',
-        'campFire' :'불멍',
-        'etc':'특이사항'
-    }
+    reservations, today_str = get_reservation()
 
-    room_list = {
-        'caravan': ['럭셔리스파카라반1', '럭셔리vip스파카라반2', '럭셔리스파카라반3', '럭셔리vip스파카라반4', '럭셔리스파카라반5', '럭셔리카라반1', '럭셔리vip카라반2', '럭셔리카라반3', '럭셔리vip카라반4', '스카이vip카라반','vip커플카라반'],
-        'pension': ['그린1', '그린2', '그린3', '펜션-커플룸', '강뷰-화이트1','강뷰-오렌지', '강뷰-옐로우1', '강뷰-옐로우2','강뷰-레드','강뷰-화이트2']
-    }
+    if not reservations:
+        print("처리할 예약 데이터가 없습니다.")
+        return
 
-    custom_order = room_list['caravan'] + room_list['pension']
+    df = pd.DataFrame(reservations)
 
-    reservations, today = get_reservation()
-    print('res : ',reservations)
-    save_path = 'C:/Users/heedo/Desktop/입실일지/'+today[:-3]+'/'
+    filename = f"예약현황_{today_str}.xlsx"
+    # Using openpyxl to create and style the workbook
+    try:
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = "예약 현황"
 
+        # DataFrame to Excel
+        for r in dataframe_to_rows(df, index=False, header=True):
+            ws.append(r)
 
+        # Get the dimensions of the sheet
+        max_row = ws.max_row
+        max_col = ws.max_column
 
-    if len(reservations) ==0:
-        print('금일 예약이 없습니다.')
-        with open(save_path+today+'_null.txt', 'w'):
-            pass
-    else:
-        try:
-            # room_list에 있는 각 객실이 reservations에 있는지 확인하고, 없으면 추가
-            for reservation_type, rooms in room_list.items():
-                for room in rooms:
-                    if not any(reservation['room_type'] == room for reservation in reservations if
-                               reservation['type'] == reservation_type):
-                        # 새로운 예약 항목 추가
-                        new_reservation = {
-                            'type': reservation_type,
-                            'room_type': room,
-                            'name': '',
-                            'phone': '',
-                            'total_count': '',
-                            'bbq': '',
-                            'campFire': '',
-                            'etc':''
-                        }
-                        reservations.append(new_reservation)
-            df = pd.DataFrame(reservations)
-            df.rename(columns=column_mapping, inplace=True)
-            df['객실명'] = pd.Categorical(df['객실명'], categories=custom_order, ordered=True)
-            df = df.sort_values(by=['종류','객실명'])
+        # --- Styling ---
+        # 1. Font
+        header_font = Font(name='맑은 고딕', size=11, bold=True)
+        body_font = Font(name='맑은 고딕', size=10)
 
-            df.drop('종류', axis=1, inplace=True)
+        # 2. Alignment
+        center_align = Alignment(horizontal='center', vertical='center', wrap_text=True)
 
-            # openpyxl을 사용하여 Excel 파일 생성
-            wb = openpyxl.Workbook()
-            ws = wb.active
-            ws.title = 'reservation'
+        # 3. Border
+        thin_border = Border(left=Side(style='thin'),
+                             right=Side(style='thin'),
+                             top=Side(style='thin'),
+                             bottom=Side(style='thin'))
 
-            # 대 제목 추가
-            a1_cell = ws['A1']
-            a1_cell.value = today + ' 예약현황'
-            a1_cell.font = Font(size=24)
-
-            # 테두리 설정
-            thin_border = Border(left=Side(style='thin'),
-                                 right=Side(style='thin'),
-                                 top=Side(style='thin'),
-                                 bottom=Side(style='thin'))
-
-            # 열 제목 설정
-            header_font = Font(bold=True, size=12)
-
-            for col_num, title in enumerate([col for col in df.columns if col != '종류'], start=1):
-                cell = ws.cell(row=3, column=col_num, value=title)
-                cell.font = header_font
-                cell.alignment = Alignment(horizontal='center')
+        # Apply styles
+        for row in ws.iter_rows(min_row=1, max_row=max_row, min_col=1, max_col=max_col):
+            for cell in row:
+                cell.alignment = center_align
                 cell.border = thin_border
+                if cell.row == 1:
+                    cell.font = header_font
+                else:
+                    cell.font = body_font
+        
+        # Adjust column widths
+        for col in ws.columns:
+            max_length = 0
+            column = col[0].column_letter
+            for cell in col:
+                try:
+                    if len(str(cell.value)) > max_length:
+                        max_length = len(cell.value)
+                except:
+                    pass
+            adjusted_width = (max_length + 2) * 1.2
+            ws.column_dimensions[column].width = adjusted_width
 
-            # 데이터 삽입
-            for r_idx, row in enumerate(dataframe_to_rows(df, index=False, header=False), start=4):
-                ws.append(row)
-                cell = ws.cell(row=r_idx, column=5)
-                cell.alignment = Alignment(wrap_text=True)
+        # Save the file
+        wb.save(filename)
+        print(f"\n[SUCCESS] '{filename}' 파일이 성공적으로 생성되었습니다.")
+        print(f"총 {len(reservations)}개의 예약 정보를 처리했습니다.")
 
-            ws['H3'] = '입실완료'
-            ws['H3'].font = header_font
-            ws['H3'].alignment = Alignment(horizontal='center')
-            ws['H3'].border = thin_border
-
-            ws['I3'] = '결제금액'
-            ws['I3'].font = header_font
-            ws['I3'].alignment = Alignment(horizontal='center')
-            ws['I3'].border = thin_border
-
-            ws['J3'] = '수수료'
-            ws['J3'].font = header_font
-            ws['J3'].alignment = Alignment(horizontal='center')
-            ws['J3'].border = thin_border
-
-            ws['K3'] = '정산금액'
-            ws['K3'].font = header_font
-            ws['K3'].alignment = Alignment(horizontal='center')
-            ws['K3'].border = thin_border
-
-            ws.column_dimensions['A'].width = 21
-            ws.column_dimensions['C'].width = 15
-            ws.column_dimensions['D'].width = 30
-            ws.column_dimensions['E'].width = 9
-            ws.column_dimensions['F'].width = 10
-            ws.column_dimensions['H'].width = 10
-            ws.column_dimensions['I'].width = 10
+    except Exception as e:
+        print(f"[CRITICAL ERROR] 엑셀 파일 생성 중 오류가 발생했습니다: {e}")
+        # 오류 발생 시, 간단한 CSV 파일로 저장 시도
+        try:
+            csv_filename = f"예약현황_백업_{today_str}.csv"
+            df.to_csv(csv_filename, index=False, encoding='utf-8-sig')
+            print(f"[INFO] 대신 '{csv_filename}' CSV 파일로 데이터를 저장했습니다.")
+        except Exception as csv_e:
+            print(f"[CRITICAL ERROR] CSV 백업 파일 저장에도 실패했습니다: {csv_e}")
 
 
-            for row in ws.iter_rows(min_row=3, min_col=1, max_row=ws.max_row, max_col=ws.max_column):
-                for cell in row:
-                    cell.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
-                    cell.border = thin_border
-
-            # 파일 저장
-            wb.save(save_path+today+'.xlsx')
-        except Exception as err:
-            print(err)
-            print('저장에 실패 했습니다.')
 # def today_reservation(room_type, client_name, phone_number):
 
-if __name__ == '__main__':
-    make_daily_paper()
+def main():
+    """메인 실행 함수"""
+    try:
+        make_daily_paper()
+    except Exception as e:
+        print(f"\n[CRITICAL ERROR] 스크립트 실행 중 예외가 발생했습니다: {e}")
+    finally:
+        print("\n\n✅ 작업 완료! 이제 터미널을 닫으셔도 됩니다.\n")
+
+if __name__ == "__main__":
+    main()
 # See PyCharm help at https://www.jetbrains.com/help/pycharm/
